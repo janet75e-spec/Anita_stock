@@ -18,57 +18,56 @@ app = Flask(__name__)
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET")
 LINE_USER_IDS = [uid.strip() for uid in (os.getenv("LINE_USER_IDS") or "").split(",") if uid.strip()]
+FINMIND_API_TOKEN = os.getenv("FINMIND_API_TOKEN")
 
-# --- 驗證環境變數是否存在 ---
+# --- 驗證環境變數 ---
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
-    raise ValueError("❌ LINE_CHANNEL_ACCESS_TOKEN 或 LINE_CHANNEL_SECRET 未正確載入，請檢查 .env 檔案")
+    raise ValueError("❌ 請確認 LINE_CHANNEL_ACCESS_TOKEN 與 LINE_CHANNEL_SECRET 是否正確設定在 .env 中")
+if not FINMIND_API_TOKEN:
+    raise ValueError("❌ 請確認 FINMIND_API_TOKEN 已設定在 .env 檔案中")
 
 # --- 初始化 LINE Bot SDK ---
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # --- 要追蹤的台股代號 ---
-TICKERS = {
-    "0050": "元大台灣50",
-    "0056": "元大高股息",
-    "00878": "國泰永續高股息",
-    "00919": "群益台灣精選高息",
-    "2330": "台積電",
-    "2317": "鴻海",
-    "2382": "廣達",
-    "2101": "南港"
-}
+TICKERS = ["0050", "0056", "00878", "00919", "2330", "2317", "2382", "2010"]
 
-# --- 抓取 FinMind 股價 ---
+
+# --- 從 FinMind 抓取股價 ---
 def get_stock_prices():
-    """從 FinMind API 抓取台股價格"""
     results = []
-    today = datetime.now(pytz.timezone("Asia/Taipei")).strftime("%Y-%m-%d")
-
-    for stock_id, name in TICKERS.items():
+    for stock_id in TICKERS:
         try:
-            url = f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockPrice&data_id={stock_id}&date={today}"
-            response = requests.get(url, timeout=10)
-            data = response.json().get("data", [])
+            url = "https://api.finmindtrade.com/api/v4/data"
+            params = {
+                "dataset": "TaiwanStockPrice",
+                "data_id": stock_id,
+                "token": FINMIND_API_TOKEN,
+            }
+            r = requests.get(url, params=params, timeout=10)
+            data = r.json()
 
-            if data:
-                latest = data[-1]
-                price = latest.get("close")
-                change = latest.get("close") - latest.get("open")
-                arrow = "▲" if change > 0 else ("▼" if change < 0 else "—")
-                pct = (change / latest.get("open") * 100) if latest.get("open") else 0
-                results.append(f"{stock_id} {name}\n💰 {price:.2f} ({arrow}{change:.2f}, {pct:.2f}%)")
+            if data.get("data"):
+                latest = data["data"][-1]
+                date = latest["date"]
+                close = latest["close"]
+                open_price = latest["open"]
+                high = latest["max"]
+                low = latest["min"]
+
+                results.append(f"{stock_id}（{date}）\n收盤價：{close}\n開盤：{open_price}  最高：{high}  最低：{low}")
             else:
-                results.append(f"{stock_id} {name}\n⚠️ 無法取得今日資料")
+                results.append(f"{stock_id} 無法取得資料（可能 API Token 錯誤或流量限制）")
+
         except Exception as e:
-            results.append(f"{stock_id} {name}\n❌ 抓取錯誤: {e}")
+            results.append(f"{stock_id} ❌ 抓取錯誤: {e}")
 
     return "\n\n".join(results)
 
 
 # --- 推播功能 ---
 def push_stock_message():
-    """推播股價到 LINE"""
     if not LINE_USER_IDS:
         print("尚未設定 LINE_USER_IDS，無法推播。")
         return
@@ -80,15 +79,15 @@ def push_stock_message():
     for uid in LINE_USER_IDS:
         try:
             line_bot_api.push_message(uid, TextSendMessage(text=message))
-            print(f"已發送給 {uid}")
+            print(f"✅ 已發送給 {uid}")
         except Exception as e:
-            print(f"發送給 {uid} 失敗: {e}")
+            print(f"❌ 發送給 {uid} 失敗: {e}")
 
 
 # --- 首頁測試 ---
 @app.route("/")
 def home():
-    return "Line Stock Bot (FinMind 版本) is running."
+    return "✅ Line Stock Bot is running."
 
 
 # --- LINE Webhook ---
@@ -107,7 +106,7 @@ def callback():
 @app.route("/push", methods=['GET'])
 def manual_push():
     push_stock_message()
-    return "✅ 已發送股價訊息（FinMind 版）"
+    return "✅ 已發送股價訊息"
 
 
 # --- 處理使用者訊息 ---
