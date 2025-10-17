@@ -3,3 +3,4 @@ line-bot-sdk
 yfinance
 pytz
 requests
+gunicorn
