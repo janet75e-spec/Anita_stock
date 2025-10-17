@@ -4,3 +4,4 @@ yfinance
 pytz
 requests
 gunicorn
+python-dotenv
