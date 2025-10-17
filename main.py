@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 from flask import Flask, request
 from linebot import LineBotApi, WebhookHandler
@@ -22,54 +22,69 @@ FINMIND_API_TOKEN = os.getenv("FINMIND_API_TOKEN")
 
 # --- 驗證環境變數 ---
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
-    raise ValueError("❌ 請確認 LINE_CHANNEL_ACCESS_TOKEN 與 LINE_CHANNEL_SECRET 是否正確設定在 .env 中")
+    raise ValueError("❌ 請確認 LINE_CHANNEL_ACCESS_TOKEN、LINE_CHANNEL_SECRET 已設定在 .env 檔案中")
 if not FINMIND_API_TOKEN:
     raise ValueError("❌ 請確認 FINMIND_API_TOKEN 已設定在 .env 檔案中")
 
-# --- 初始化 LINE Bot SDK ---
+# --- 初始化 LINE Bot ---
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# --- 要追蹤的台股代號 ---
-TICKERS = ["0050", "0056", "00878", "00919", "2330", "2317", "2382", "2010"]
+# --- 要追蹤的股票代號與名稱 ---
+STOCKS = {
+    "0050": "元大台灣50",
+    "0056": "元大高股息",
+    "00878": "國泰永續高股息",
+    "00919": "群益台灣精選高息",
+    "2330": "台積電",
+    "2317": "鴻海",
+    "2382": "廣達",
+    "2101": "南港"
+}
 
 
-# --- 從 FinMind 抓取股價 ---
+# --- 抓取台股股價（FinMind API）---
+def fetch_stock_price(code):
+    """從 FinMind 抓取單一股票資料"""
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    try:
+        url = (
+            f"https://api.finmindtrade.com/api/v4/data?"
+            f"dataset=TaiwanStockPrice&data_id={code}"
+            f"&start_date={start_date}&end_date={end_date}"
+            f"&token={FINMIND_API_TOKEN}"
+        )
+        r = requests.get(url)
+        data = r.json()
+
+        if data.get("msg") != "success" or not data.get("data"):
+            return f"{code} ⚠️ 無法取得資料（API Token 錯誤或流量限制）"
+
+        latest = data["data"][-1]
+        price = latest["close"]
+        change = latest["close"] - latest["open"]
+        pct = (change / latest["open"]) * 100 if latest["open"] else 0
+        arrow = "▲" if change > 0 else ("▼" if change < 0 else "—")
+
+        name = STOCKS.get(code, "未知名稱")
+        return f"{code} {name}\n收盤價 {price:.2f} ({arrow}{change:.2f}, {pct:.2f}%)"
+
+    except Exception as e:
+        return f"{code} ❌ 抓取錯誤: {e}"
+
+
 def get_stock_prices():
-    results = []
-    for stock_id in TICKERS:
-        try:
-            url = "https://api.finmindtrade.com/api/v4/data"
-            params = {
-                "dataset": "TaiwanStockPrice",
-                "data_id": stock_id,
-                "token": FINMIND_API_TOKEN,
-            }
-            r = requests.get(url, params=params, timeout=10)
-            data = r.json()
-
-            if data.get("data"):
-                latest = data["data"][-1]
-                date = latest["date"]
-                close = latest["close"]
-                open_price = latest["open"]
-                high = latest["max"]
-                low = latest["min"]
-
-                results.append(f"{stock_id}（{date}）\n收盤價：{close}\n開盤：{open_price}  最高：{high}  最低：{low}")
-            else:
-                results.append(f"{stock_id} 無法取得資料（可能 API Token 錯誤或流量限制）")
-
-        except Exception as e:
-            results.append(f"{stock_id} ❌ 抓取錯誤: {e}")
-
-    return "\n\n".join(results)
+    """抓取多檔股票"""
+    return "\n\n".join([fetch_stock_price(code) for code in STOCKS.keys()])
 
 
 # --- 推播功能 ---
 def push_stock_message():
+    """推播股價到 LINE"""
     if not LINE_USER_IDS:
-        print("尚未設定 LINE_USER_IDS，無法推播。")
+        print("⚠️ 尚未設定 LINE_USER_IDS，無法推播。")
         return
 
     tz = pytz.timezone("Asia/Taipei")
@@ -87,7 +102,7 @@ def push_stock_message():
 # --- 首頁測試 ---
 @app.route("/")
 def home():
-    return "✅ Line Stock Bot is running."
+    return "✅ Line Stock Bot is running on Render!"
 
 
 # --- LINE Webhook ---
@@ -102,11 +117,11 @@ def callback():
     return "OK"
 
 
-# --- 手動推播測試 ---
+# --- 手動推播測試用 ---
 @app.route("/push", methods=['GET'])
 def manual_push():
     push_stock_message()
-    return "✅ 已發送股價訊息"
+    return "✅ 已手動發送股價訊息！"
 
 
 # --- 處理使用者訊息 ---
@@ -114,10 +129,22 @@ def manual_push():
 def handle_message(event):
     user_text = event.message.text.strip()
 
-    if "股價" in user_text:
+    # 若輸入「股價」：顯示全部
+    if user_text == "股價":
         reply = get_stock_prices()
+
+    # 若輸入的是代碼（例如 2330）
+    elif user_text in STOCKS.keys():
+        reply = fetch_stock_price(user_text)
+
+    # 若輸入的是股票名稱（例如 台積電）
+    elif user_text in STOCKS.values():
+        # 反查代碼
+        code = [k for k, v in STOCKS.items() if v == user_text][0]
+        reply = fetch_stock_price(code)
+
     else:
-        reply = "請輸入「股價」即可查詢最新台股資訊 📊"
+        reply = "請輸入『股價』查看全部，或直接輸入股票代碼（例如：2330）📊"
 
     line_bot_api.reply_message(
         event.reply_token,
